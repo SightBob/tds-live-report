@@ -625,7 +625,8 @@
         const ae = document.activeElement;
         const typingInModal = ae && (ae.id === "accLabel" || ae.id === "accSold");
         if (!typingInModal) {
-          loadHistory(openDetailId); // รีเฟรชประวัติอัตโนมัติ (throttle 30 วิ ข้างใน)
+          loadHistory(openDetailId, "coin"); // รีเฟรชประวัติอัตโนมัติ (throttle 30 วิ ข้างใน)
+          loadHistory(openDetailId, "gem");
           renderDetailCard(openRow);
         }
       }
@@ -672,8 +673,12 @@
         ${towersHtml(row.missing_towers, "ซื้อครบทุกตัวในเกมแล้ว 🎉", "missing")}
       </div>
       <div class="d-section">
-        <h3>💰 ประวัติได้เงิน ${historySummary(row.id)}</h3>
-        ${historyHtml(row.id)}
+        <h3>💰 ประวัติได้เงิน ${historySummary(row.id, "coin")}</h3>
+        ${historyHtml(row.id, "coin")}
+      </div>
+      <div class="d-section">
+        <h3>💎 ประวัติ Gem ${historySummary(row.id, "gem")}</h3>
+        ${historyHtml(row.id, "gem")}
       </div>
       <div class="d-section">
         <h3>การจัดการ Account</h3>
@@ -713,48 +718,54 @@
     } catch { return "0"; }
   }
 
-  // ===== ประวัติได้เงิน (ตาราง coin_history บน Supabase) =====
-  const historyCache = new Map();   // playerId -> array of {delta, coins, created_at} (ล่าสุดก่อน)
-  const historyLoaded = new Set();  // playerId ที่โหลดแล้ว
+  // ===== ประวัติเงิน/Gem (coin_history, gem_history บน Supabase) =====
+  const historyCache = new Map();      // key = "coin:<id>" / "gem:<id>" -> array {delta, coins, created_at} ล่าสุดก่อน
   const historyLastFetch = new Map();
 
-  async function loadHistory(id, force) {
-    const last = historyLastFetch.get(id) || 0;
+  const historyMeta = {
+    coin: { icon: "🪙", table: "coin_history", color: "#2ee08a", empty: "ยังไม่มีประวัติ — เริ่มเก็บเมื่อ coin ของจอนี้เพิ่มขึ้นครั้งแรก" },
+    gem:  { icon: "💎", table: "gem_history",  color: "#8f7dff", empty: "ยังไม่มีประวัติ — เริ่มเก็บเมื่อ gem ของจอนี้เพิ่มขึ้นครั้งแรก" },
+  };
+
+  async function loadHistory(id, kind, force) {
+    const key = kind + ":" + id;
+    const last = historyLastFetch.get(key) || 0;
     if (!force && Date.now() - last < 30 * 1000) return; // throttle 30 วิ
-    historyLoaded.add(id);
-    historyLastFetch.set(id, Date.now());
+    historyLastFetch.set(key, Date.now());
     try {
-      const { data } = await sb.from("coin_history")
+      const { data } = await sb.from(historyMeta[kind].table)
         .select("delta, coins, created_at")
         .eq("player_id", id)
         .order("id", { ascending: false })
         .limit(60);
-      historyCache.set(id, Array.isArray(data) ? data : []);
+      historyCache.set(key, Array.isArray(data) ? data : []);
       if (openDetailId === id) renderDetailCard(rows.get(id));
     } catch { /* โหลดไม่ได้ก็ข้ามไป */ }
   }
-  function historySummary(id) {
-    const list = historyCache.get(id) || [];
+  function historySummary(id, kind) {
+    const list = historyCache.get(kind + ":" + id) || [];
     if (!list.length) return "";
     const today = new Date().toDateString();
     let todaySum = 0;
     list.forEach((h) => {
       if (new Date(h.created_at).toDateString() === today) todaySum += Number(h.delta || 0);
     });
-    return `— วันนี้ +${todaySum.toLocaleString("th-TH")} 🪙`;
+    return `— วันนี้ +${todaySum.toLocaleString("th-TH")} ${historyMeta[kind].icon}`;
   }
-  function historyHtml(id) {
-    const list = historyCache.get(id) || [];
-    if (!historyLoaded.has(id)) return `<span class="mono">กำลังโหลดประวัติ…</span>`;
-    if (!list.length) return `<span class="mono">ยังไม่มีประวัติ — เริ่มเก็บข้อมูลหลังคอยน์ของจอนี้เพิ่มขึ้นเป็นครั้งแรก</span>`;
+  function historyHtml(id, kind) {
+    const meta = historyMeta[kind];
+    const key = kind + ":" + id;
+    const list = historyCache.get(key) || [];
+    if (!historyLastFetch.has(key)) return `<span class="mono">กำลังโหลดประวัติ…</span>`;
+    if (!list.length) return `<span class="mono">${meta.empty}</span>`;
     return `<div class="hlist">${list.map((h) => {
       const t = new Date(h.created_at);
       const time = t.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) +
         ` <span style="color:var(--muted)">${t.toLocaleDateString("th-TH", { day: "2-digit", month: "short" })}</span>`;
       return `<div class="hrow">
           <span class="mono" style="color:var(--muted)">${time}</span>
-          <span style="color:#2ee08a;font-weight:600">+${Number(h.delta).toLocaleString("th-TH")}</span>
-          <span class="mono">= ${Number(h.coins).toLocaleString("th-TH")} 🪙</span>
+          <span style="color:${meta.color};font-weight:600">+${Number(h.delta).toLocaleString("th-TH")}</span>
+          <span class="mono">= ${Number(h.coins).toLocaleString("th-TH")} ${meta.icon}</span>
         </div>`;
     }).join("")}</div>`;
   }
@@ -781,7 +792,8 @@
     openDetailId = id;
     document.body.classList.add("page-detail");
     $("detailPage").classList.remove("hidden");
-    loadHistory(id, true);
+    loadHistory(id, "coin", true);
+    loadHistory(id, "gem", true);
     renderDetailCard(row);
   }
 
