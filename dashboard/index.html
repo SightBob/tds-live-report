@@ -327,31 +327,74 @@
   const SUPABASE_URL = "https://ajcqqfrvumyxupufnesd.supabase.co";
   const SUPABASE_ANON_KEY = "sb_publishable_k2UQNK0MJsJP0roEPFH0Qw_7wOe-VhG";
 
-  // ===== แจ้งเตือนอีเมลเมื่อแอคเคานต์หยุดส่งข้อมูล — FormSubmit ฟรี (ครั้งแรกต้องกดลิงก์ยืนยันในเมล) =====
-  const ALERT_STALE_MS = 3 * 60 * 1000;
-  const alertLastSent = {};
-  function sendAlert(rowId, minutesStale) {
+  // ===== แจ้งเตือนอีเมลเมื่อแอคเคานต์หลุด — FormSubmit ฟรี (ครั้งแรกต้องกดลิงก์ยืนยันในเมล) =====
+  const ALERT_STALE_MS = 3 * 60 * 1000;   // หลุด = ไม่ส่งข้อมูลมา 3 นาที
+  const ALERT_OLD_MS = 6 * 60 * 60 * 1000; // ข้อมูลที่ไม่ได้อัปเดต >6 ชม. = แถวเก่าค้าง — ไม่แจ้งอีก
+  const alertCoolDown = 30 * 60 * 1000;    // เมล "หลุด" ต่อเนื่อง: แจ้งทันที แล้วรอ 30 นาที
+  const offlineAlertedIds = new Set();     // id ที่แจ้งไปแล้วและยังอยู่สถานะหลุด (เอาไว้ตรวจ "กลับมาแล้ว")
+  let lastAlertMailAt = 0;
+
+  const alertClock = (iso) => new Date(iso).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+
+  function whoAmI(id) {
+    return accountLabel(id) ? (accountLabel(id) + " (id " + id + ")") : ("id " + id);
+  }
+
+  function alertMail(subject, message) {
     const email = (localStorage.getItem("tds_alert_email") || "").trim();
     if (!email) return;
-    if (alertLastSent[rowId] && Date.now() - alertLastSent[rowId] < 30 * 60 * 1000) return;
-    alertLastSent[rowId] = Date.now();
-    const who = accountLabel(rowId) ? (accountLabel(rowId) + " (id " + rowId + ")") : ("id " + rowId);
     fetch("https://formsubmit.co/ajax/" + encodeURIComponent(email), {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
-        _subject: "🚨 TDS Farm: " + who + " หยุดส่งข้อมูล",
-        message: who + " ไม่ส่งข้อมูลมาแล้ว ~" + minutesStale + " นาที — เกมน่าจะปิด/ค้าง ให้เข้าไปตรวจ cloudphone จอนั้น",
+        _subject: subject,
+        message: message,
         _template: "table",
       }),
     }).catch(() => {});
   }
+
   function watchAlerts() {
     const now = Date.now();
+    const offlineRows = [];
+    const currentOffline = new Set();
     rows.forEach((row, id) => {
       const stale = now - new Date(row.updated_at).getTime();
-      if (stale > ALERT_STALE_MS && stale < 6 * 60 * 60 * 1000) {
-        sendAlert(id, Math.round(stale / 60000));
+      if (stale > ALERT_STALE_MS && stale < ALERT_OLD_MS) {
+        currentOffline.add(id);
+        offlineRows.push({ row, id, stale });
+      }
+    });
+
+    const offlineCount = offlineRows.length;
+    if (offlineCount > 0) {
+      // เมล "หลุด" — รวมทุกจอที่หลุดเป็นเมลเดียว, เมลถัดไปได้เมื่อครบ 30 นาที (กัน spam)
+      if (now - lastAlertMailAt >= alertCoolDown) {
+        lastAlertMailAt = now;
+        const lines = offlineRows.map(({ row, id, stale }) =>
+          "• " + whoAmI(id) + " — หลุดตั้งแต่ " + alertClock(row.updated_at)
+            + " น. (ไม่ตอบมาราว " + Math.round(stale / 60000) + " นาที · สถานะสุดท้าย: "
+            + (STATUS_STYLE[row.status]?.label ?? row.status) + ")"
+        ).join("\n");
+        alertMail(
+          "🚨 TDS Farm: " + offlineCount + " จอหลุด — " + alertClock(now),
+          "แอคเคานต์ที่หยุดส่งข้อมูล:\n\n" + lines
+            + "\n\n👉 เข้าตรวจ cloudphone จอนั้น / กด Run live_loader.lua ใหม่ให้ตัวเกมเปิดมาส่งข้อมูลต่อ",
+        );
+      }
+      offlineRows.forEach(({ id }) => offlineAlertedIds.add(id));
+    }
+
+    // เมล "กลับมาแล้ว" — ทุกตัวที่เคยแจ้งแล้วกลับมาส่งข้อมูลปกติ
+    offlineAlertedIds.forEach((id) => {
+      if (!currentOffline.has(id)) {
+        offlineAlertedIds.delete(id);
+        const lastSeen = rows.get(id)?.updated_at;
+        alertMail(
+          "✅ TDS Farm: กลับมาออนไลน์แล้ว — " + whoAmI(id),
+          whoAmI(id) + " กลับมาส่งข้อมูลปกติแล้ว"
+            + (lastSeen ? " (ก่อนหน้าหลุด ตั้งแต่ " + alertClock(lastSeen) + " น.)" : ""),
+        );
       }
     });
   }
