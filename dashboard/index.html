@@ -337,6 +337,7 @@
 <script>
   const SUPABASE_URL = "https://ajcqqfrvumyxupufnesd.supabase.co";
   const SUPABASE_ANON_KEY = "sb_publishable_k2UQNK0MJsJP0roEPFH0Qw_7wOe-VhG";
+  let sb; // supabase client — สร้างใน main() แต่ให้ทุกฟังก์ชันในหน้าเรียกใช้ได้
 
   // ===== แจ้งเตือนอีเมลเมื่อแอคเคานต์หลุด — FormSubmit ฟรี (ครั้งแรกต้องกดลิงก์ยืนยันในเมล) =====
   const ALERT_STALE_MS = 3 * 60 * 1000;   // หลุด = ไม่ส่งข้อมูลมา 3 นาที
@@ -791,7 +792,7 @@
   window.addEventListener("hashchange", applyRoute);
 
   async function main() {
-    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     const emailInput = $("alertEmail");
     emailInput.value = localStorage.getItem("tds_alert_email") || "";
