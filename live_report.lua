@@ -814,6 +814,15 @@ local function TrackRun(coins, wins)
     end
 end
 
+local function GetLocalTeam()
+    local stateReplicators =
+        ReplicatedStorage:FindFirstChild("StateReplicators")
+
+    local pr = stateReplicators and stateReplicators:FindFirstChild("PlayerReplicator")
+
+    return pr and pr:GetAttribute("Team") or nil
+end
+
 local function BuildRunResult(statusKey, coins, wins)
     if statusKey ~= "GameOver" or RunResultSent then
         return
@@ -821,9 +830,22 @@ local function BuildRunResult(statusKey, coins, wins)
 
     RunResultSent = true
 
+    -- ชนะ/แพ้: แหล่งของจริงจากเกม = WinningTeam (ทีมที่ชนะ) เทียบทีมของจอนี้
+    -- (ยืนยันจาก DEBUG2 จอจบเกมจริง: WinningTeam=10 + ทีมตัวเอง 10 → ชนะ)
     local result = nil
 
-    if wins ~= nil and RunStartWins ~= nil then
+    pcall(function()
+        local rep = GetRep()
+        local winning = rep and rep:GetAttribute("WinningTeam") or nil
+        local team = GetLocalTeam()
+
+        if winning ~= nil and team ~= nil then
+            result = tostring(winning) == tostring(team) and "win" or "lose"
+        end
+    end)
+
+    -- สำรอง: จำนวน Wins ขยับภายใน run → ชนะ (กรณี WinningTeam อ่านไม่ได้)
+    if result == nil and wins ~= nil and RunStartWins ~= nil then
         result = wins > RunStartWins and "win" or "lose"
     end
 
@@ -1164,31 +1186,86 @@ LoaderActive = false
 -- (ไม่ตัด ErrorConnection/PromptConnection — ให้ watcher ค้างอยู่ตลอดตัวโปรแกรม)
 ReconnectCheckRunning = false
 
--- ================= Watchdog จอหลุด (popup Reconnect ค้าง) =================
--- Popup "Reconnect was unsuccessful ... ErrorCode 77x" ค้างแล้วเกมตายตลอด:
---   * ตรวจทุก 5 วิ → สถานะบน dashboard ขึ้น "Disconnected" ทันที
---   * ลอง TeleportReconnect ทุก 10 วิ ใน 4 นาทีแรก
---   * หา 4 นาทียังค้าง → teleport เข้า Lobby ใหม่ทั้งระบบ (รื้อ popup ทันที)
+-- ================= Keepระบบ Reconnect เดิมและ watchdog จอหลุด (popup ค้าง) =================
+-- * ตรวจทุก 5 วิ → สถานะบน dashboard ขึ้น "Disconnected" เฉพาะเมื่อหลุดจริง (ยืนยันนิ่ง ~15 วิ)
+--   - จับจาก popup จริง (ErrorPrompt แขวนใน promptOverlay) = หลุดชัดเจน
+--   - หรือ error code / player หลุดจาก Players นิ่ง 15 วิ (กัน false positive ตอน teleport/โหลด)
+--   - ถ้ามีจอโหลดอยู่ = โครงปกติ → รีเซ็ตเสมอ
+-- * หลุดนิ่ง: ลอง TeleportReconnect ทุก 10 วิ ใน 4 นาทีแรก
+-- * หา 4 นาทียังค้าง → teleport เข้า Lobby ใหม่ทั้งระบบ (รื้อ popup ทันที)
 local DisconnectedSince = nil
 local LastRejoinAttempt = 0
+local DiscRawFirstAt = nil
 
 local function IsDisconnected()
-    local okCode, hasError = pcall(function()
-        local code = GuiService:GetErrorCode()
+    -- (1) จอโหลด/teleport อยู่ = สถานะปกติที่ผ่านได้เอง → ไม่นับว่าหลุด
+    local okLoading, loading = pcall(IsLoading)
 
-        return code ~= nil
-            and code ~= Enum.ConnectionError.OK
+    if okLoading and loading then
+        DiscRawFirstAt = nil
+        return false
+    end
+
+    -- (2) popup จริง: ErrorPrompt ยังแขวนอยู่ใน CoreGui promptOverlay = หลุดชัดเจน
+    local popupVisible = false
+
+    pcall(function()
+        local overlay =
+            CoreGui:FindFirstChild("RobloxPromptGui")
+            and CoreGui.RobloxPromptGui:FindFirstChild("promptOverlay")
+
+        if overlay then
+            for _, child in ipairs(overlay:GetChildren()) do
+                if child.Name == "ErrorPrompt"
+                    and child.Visible ~= false then
+
+                    popupVisible = true
+                    break
+                end
+            end
+        end
     end)
 
-    if okCode and hasError then
+    if popupVisible then
+        DiscRawFirstAt = nil
         return true
     end
 
-    local okDesc, playerAlive = pcall(function()
-        return LocalPlayer:IsDescendantOf(game)
+    -- (3) สัญญาณอ่อน: error code ค้าง / player ขาดจาก ต้องนิ่ง ≥15 วิ จึงยอมว่าหลุด
+    local raw = false
+
+    pcall(function()
+        local code = GuiService:GetErrorCode()
+
+        if code ~= nil
+            and code ~= Enum.ConnectionError.OK then
+
+            raw = true
+        end
     end)
 
-    return okDesc and not playerAlive
+    pcall(function()
+        if not LocalPlayer:IsDescendantOf(game) then
+            raw = true
+        end
+    end)
+
+    local now = os.clock()
+
+    if not raw then
+        DiscRawFirstAt = nil
+        return false
+    end
+
+    if not DiscRawFirstAt then
+        DiscRawFirstAt = now
+    end
+
+    if now - DiscRawFirstAt >= 15 then
+        return true
+    end
+
+    return false
 end
 
 task.spawn(function()
