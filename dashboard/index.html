@@ -354,6 +354,22 @@
   }
   .d-close:hover { transform: translateY(-1px); }
   .d-close:active { transform: translateY(0); }
+
+  /* ปุ่มลบบัญชี (หน้า detail) */
+  .d-del {
+    margin-top: 14px; width: 100%;
+    background: rgba(239, 68, 68, .10);
+    border: 1px solid rgba(239, 68, 68, .38);
+    border-radius: 10px; padding: 9px 13px;
+    color: #fca5a5; font-size: 12.5px; cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s, transform .15s;
+  }
+  .d-del:hover {
+    transform: translateY(-1px);
+    border-color: rgba(239, 68, 68, .7);
+    background: rgba(239, 68, 68, .16);
+  }
+  .d-del:active { transform: translateY(0); }
   h3 { color: var(--text); }
   .hrow:nth-child(even) { background: rgba(148, 163, 184, .045); border-radius: 8px; }
   .empty .big { filter: saturate(.85); }
@@ -845,7 +861,8 @@
             <input class="d-input" id="accSold" value="${esc(labelsAll()[row.id]?.sold || "")}" placeholder="เช่น 4500" inputmode="numeric">
           </div>
         </div>
-      </div>`;
+      </div>
+      <button class="d-del" id="deleteAccBtn">🗑️ ลบบัญชีนี้ถาวร (ล้างประวัติ coin/gem ด้วย)</button>`;
 
     $("detailClose").addEventListener("click", closeDetail);
 
@@ -861,6 +878,23 @@
       saveLabels(all);
       render();
     });
+    $("deleteAccBtn").addEventListener("click", () => deleteAccount(row.id));
+  }
+
+  // ====== ลบบัญชี (DB ลบแถว reports → trigger ล้าง coin/gem history ให้อัตโนมัติ) ======
+  async function deleteAccount(id) {
+    const nm = accountLabel(id) || "";
+    if (!confirm("ลบบัญชีนี้ถาวรใช่ไหม?" + (nm ? "\n• " + nm : "") + "\n\nประวัติ coin/gem ของบัญชีนี้จะถูกล้างไปด้วย\nกด \"ตกลง\" = ลบสิ่งนี้เลย")) return;
+    const { error } = await sb.from("reports").delete().eq("id", id);
+    if (error) { showBanner("⚠️ ลบไม่สำเร็จ: " + error.message); return; }
+
+    const all = labelsAll();
+    if (all[id]) { delete all[id]; saveLabels(all); }
+    manualOrder = manualOrder.filter((x) => x !== id);
+    saveOrderConfig();
+    rows.delete(id);           // หายจากตารางทันที (รอบถัดไป DB ยืนยันอีกชั้น)
+    closeDetail();
+    render();
   }
 
   function arrayLenString(raw) {
