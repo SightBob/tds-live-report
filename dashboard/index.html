@@ -497,17 +497,9 @@
   }
 
   function alertMail(subject, message) {
-    const email = (localStorage.getItem("tds_alert_email") || "").trim();
-    if (!email) return;
-    fetch("https://formsubmit.co/ajax/" + encodeURIComponent(email), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        _subject: subject,
-        message: message,
-        _template: "table",
-      }),
-    }).catch(() => {});
+    // ⚠️ แจ้งเตือนถูกย้ายไปฝั่งเซิร์ฟเวอร์แล้ว (pg_cron + pg_net ใน Supabase — fn_server_alerts วิ่งทุกนาที)
+    // เพื่อให้แจ้งได้แม้เว็บปิดอยู่ และไม่ให้เมลซ้ำสองทาง — ฟังก์ชันนี้หยุดส่งเงียบ ๆ
+    return;
   }
 
   function watchAlerts() {
