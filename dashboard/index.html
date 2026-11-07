@@ -587,6 +587,7 @@
   const STATUS_STYLE = {
     Playing:    { bg: "#2ee08a", label: "กำลังเล่น" },
     GameOver:   { bg: "#ff5470", label: "Game Over", fg: "#180a0e" },
+    Disconnected: { bg: "#ff5470", label: "หลุด (Reconnect)" },
     Recovering: { bg: "#ffb340", label: "กำลังกู้คืน" },
     Loading:    { bg: "#4d8dff", label: "กำลังโหลด" },
     Lobby:      { bg: "#5a657f", label: "Lobby" },
@@ -796,6 +797,7 @@
         if (!typingInModal) {
           loadHistory(openDetailId, "coin"); // รีเฟรชประวัติอัตโนมัติ (throttle 30 วิ ข้างใน)
           loadHistory(openDetailId, "gem");
+          loadRuns(openDetailId);
           renderDetailCard(openRow);
         }
       }
@@ -848,6 +850,10 @@
       <div class="d-section">
         <h3>💎 ประวัติ Gem ${historySummary(row.id, "gem")}</h3>
         ${historyHtml(row.id, "gem")}
+      </div>
+      <div class="d-section">
+        <h3>🎯 ประวัติยกเกม (ชนะ/แพ้)</h3>
+        ${runsHtml(row.id)}
       </div>
       <div class="d-section">
         <h3>การจัดการ Account</h3>
@@ -957,6 +963,50 @@
     }).join("")}</div>`;
   }
 
+  // ===== ประวัติยกเกม (run_history: ชนะ/แพ้ + จบ wave ไหน + coin ที่ได้ทั้ง run) =====
+  const runsCache = new Map();      // key = "runs:<id>" -> array ล่าสุดก่อน
+  const runsLastFetch = new Map();
+
+  async function loadRuns(id, force) {
+    const key = "runs:" + id;
+    const last = runsLastFetch.get(key) || 0;
+    if (!force && Date.now() - last < 30 * 1000) return; // throttle 30 วิ
+    runsLastFetch.set(key, Date.now());
+    try {
+      const { data } = await sb.from("run_history")
+        .select("result, wave, run_coins, difficulty, ended_at")
+        .eq("player_id", id)
+        .order("id", { ascending: false })
+        .limit(30);
+      runsCache.set(key, Array.isArray(data) ? data : []);
+      if (openDetailId === id) renderDetailCard(rows.get(id));
+    } catch { /* โหลดไม่ได้ก็ข้ามไป */ }
+  }
+
+  function runsHtml(id) {
+    const key = "runs:" + id;
+    const list = runsCache.get(key) || [];
+    if (!runsLastFetch.has(key)) return `<span class="mono">กำลังโหลดประวัติยกเกม…</span>`;
+    if (!list.length) return `<span class="mono">ยังไม่มียกเกมที่จับได้ — จะเริ่มบันทักษะ "ชนะ/แพ้ + wave" เมื่อจอนี้จบเกมด้วย script เวอร์ชันใหม่</span>`;
+    return `<div class="hlist">${list.map((r) => {
+      const t = new Date(r.ended_at);
+      const time = t.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) +
+        ` <span style="color:var(--muted)">${t.toLocaleDateString("th-TH", { day: "2-digit", month: "short" })}</span>`;
+      const resIcon = r.result === "win" ? "🏆 ชนะ" : r.result === "lose" ? "💀 แพ้" : "❓ ไม่ทราบ";
+      const resColor = r.result === "win" ? "#22c55e" : r.result === "lose" ? "#ef4444" : "var(--muted)";
+      const wave = r.wave != null ? `จบ wave ${r.wave}` : "wave ไม่ทราบ";
+      const coinPart = r.run_coins != null && Number(r.run_coins) !== 0
+        ? ` <span class="mono" style="color:#22c55e">${Number(r.run_coins) > 0 ? "+" : ""}${Number(r.run_coins).toLocaleString("th-TH")} 🪙</span>`
+        : "";
+      const diff = r.difficulty ? ` <span class="mono" style="color:var(--muted)">${esc(r.difficulty)}</span>` : "";
+      return `<div class="hrow">
+          <span class="mono" style="color:var(--muted)">${time}</span>
+          <span style="color:${resColor};font-weight:600">${resIcon}</span>
+          <span class="mono">${wave}${coinPart}${diff}</span>
+        </div>`;
+    }).join("")}</div>`;
+  }
+
   function openDetail(id) {
     location.hash = "p/" + id;
   }
@@ -1006,6 +1056,7 @@
     $("detailPage").classList.remove("hidden");
     loadHistory(id, "coin", true);
     loadHistory(id, "gem", true);
+    loadRuns(id, true);
     renderDetailCard(row);
   }
 
