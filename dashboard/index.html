@@ -358,6 +358,19 @@
   .hrow:nth-child(even) { background: rgba(148, 163, 184, .045); border-radius: 8px; }
   .empty .big { filter: saturate(.85); }
 
+  /* manual order mode */
+  .chip-btn { cursor: pointer; transition: border-color .15s, background .15s; }
+  .chip-btn:hover { border-color: rgba(34, 197, 94, .5); background: rgba(34, 197, 94, .10); }
+  .chip-btn-on, .chip-btn-on:hover {
+    border-color: rgba(34, 197, 94, .6) !important;
+    background: rgba(34, 197, 94, .14);
+    color: #86efac;
+  }
+  body.mode-manual thead th { cursor: default; }
+  body.mode-manual thead th:hover, body.mode-manual thead th.sorted { color: var(--muted); }
+  tr[draggable="true"] { outline: 1px dashed rgba(34, 197, 94, .28); outline-offset: -1px; }
+  tr.dragging { opacity: .4; }
+
   /* focus ring */
   :focus-visible {
     outline: 2px solid var(--ring);
@@ -403,6 +416,7 @@
       <div class="chip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="color:#86efac;flex:none"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> <span id="countOnline">0</span> ออนไลน์ / <span id="countTotal">0</span> คน</div>
       <div class="chip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="color:#fcd34d;flex:none"><circle cx="9" cy="8" r="6"/><path d="M6.5 3.5v9M11.5 3.5v9M9 2v11"/><path d="M20.2 15.2c-.6-.7-1.7-.5-2 .3l-1.5 3.5H15l2.9-9.3c.2-.6-.3-1.2-1-1.2h-1.4"/></svg> Coin รวม <span id="sumCoins">0</span></div>
       <div class="chip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="color:#a7f3d0;flex:none"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg> ขายแล้วรวม <span id="sumSold">—</span></div>
+      <div class="chip chip-btn" id="orderToggle" role="button" tabindex="0" title="สลับโหมดเรียง: AUTO (คลิกหัวตาราง) / ลากจัดเอง"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="color:currentColor;flex:none"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="9 8 12 5 15 8"/><polyline points="9 16 12 19 15 16"/></svg> เรียง: <span id="orderState">AUTO</span></div>
       <div class="chip"><input id="alertEmail" placeholder="อีเมลแจ้งเตือน (ว่าง=ปิด)" style="width:160px;background:transparent;border:none;color:var(--text);font-family:inherit;font-size:12px;outline:none"></div>
     </div>
   </div>
@@ -472,7 +486,8 @@
     alertEmailSaveTimer = setTimeout(() => {
       if (sb) {
         sb.from("alert_config")
-          .upsert({ id: "global", email: email || null, updated_at: new Date().toISOString() }, { onConflict: "id" });
+          .upsert({ id: "global", email: email || null, updated_at: new Date().toISOString() }, { onConflict: "id" })
+          .then(() => { /* บันทึกสำเร็จ */ }, (e) => console.warn("บันทึกอีเมลไม่สำเร็จ:", e));
       }
     }, 800);
   }
@@ -574,6 +589,11 @@
   let sortKey = DEFAULT_SORT.key;
   let sortDir = DEFAULT_SORT.dir;
 
+  // ===== โหมดจัดลำดับเอง (ลากแถวสลับบน/ล่าง) =====
+  let sortMode = "auto";            // "auto" = เรียงตามคอลัมน์ | "manual" = ตามที่ลากเอง
+  let manualOrder = [];             // [playerId,...] ตามลำดับที่จัดไว้
+  let orderSaveTimer = null;
+
   function sortValue(row, key) {
     switch (key) {
       case "name":   return (row.display_name || row.username || "").toLowerCase();
@@ -625,6 +645,9 @@
     const d = document.createElement("div");
     d.textContent = t == null ? "" : String(t);
     return d.innerHTML;
+  }
+  function cssEscape(s) {
+    return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&");
   }
   function relTime(iso) {
     const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
@@ -707,6 +730,15 @@
       return sortDir === "asc" ? cmp : -cmp;
     });
 
+    if (sortMode === "manual" && manualOrder.length) {
+      const idx = new Map(manualOrder.map((id, i) => [id, i]));
+      list.sort((a, b) => {
+        const ia = idx.has(a.id) ? idx.get(a.id) : 99999;   // แถวใหม่ที่ยังไม่เคยจัด → ไปท้าย
+        const ib = idx.has(b.id) ? idx.get(b.id) : 99999;
+        return ia - ib;
+      });
+    }
+
     let online = 0;
     list.forEach((r) => { if (isOnline(r)) online++; });
     let sumCoins = 0, sumSold = 0;
@@ -725,7 +757,7 @@
 
     if (list.length > 0) {
       $("tbody").innerHTML = list.map((row) => `
-      <tr class="${isOnline(row) ? "" : "offrow"}" data-player-id="${esc(row.id)}" style="cursor:pointer" title="คลิกเพื่อดูรายละเอียด">
+      <tr class="${isOnline(row) ? "" : "offrow"}" data-player-id="${esc(row.id)}" ${sortMode === "manual" ? 'draggable="true"' : ""} style="cursor:pointer" title="คลิกเพื่อดูรายละเอียด${sortMode === "manual" ? " · ลากเพื่อจัดลำดับ" : ""}">
         <td>${playerCell(row)}</td>
         <td>${statusCell(row)}</td>
         <td class="num">${row.coins != null ? Number(row.coins).toLocaleString("th-TH") : "—"}</td>
@@ -903,6 +935,31 @@
     location.hash = "p/" + id;
   }
 
+  // ===== จัดลำดับเอง: ป้ายสลับ / บันทึก (localStorage + DB) =====
+  function updateOrderChip() {
+    document.body.classList.toggle("mode-manual", sortMode === "manual");
+    const chipEl = $("orderToggle");
+    if (chipEl) chipEl.classList.toggle("chip-btn-on", sortMode === "manual");
+    const st = $("orderState");
+    if (st) st.textContent = sortMode === "manual" ? "ลากจัดเอง" : "AUTO";
+  }
+  function saveOrderConfig() {
+    try { localStorage.setItem("tds_manual_order", JSON.stringify({ mode: sortMode, order: manualOrder })); } catch { }
+    clearTimeout(orderSaveTimer);
+    orderSaveTimer = setTimeout(() => {
+      if (sb) {
+        sb.from("order_config")
+          .upsert({ id: "global", order: { mode: sortMode, order: manualOrder }, updated_at: new Date().toISOString() }, { onConflict: "id" })
+          .then(() => { /* บันทึกสำเร็จ */ }, (e) => console.warn("บันทึกลำดับไม่สำเร็จ:", e));
+      }
+    }, 800);
+  }
+  function commitManualOrder() {
+    manualOrder = [...$("tbody").querySelectorAll("tr[data-player-id]")].map((tr) => tr.dataset.playerId);
+    if (sortMode !== "manual") { sortMode = "manual"; updateOrderChip(); }
+    saveOrderConfig();
+  }
+
   function closeDetail() {
     if ((location.hash || "").startsWith("#p/")) location.hash = "";
   }
@@ -990,10 +1047,70 @@
       $("connInfo").textContent = parts.join("  ");
     }, 1000);
 
+    // ===== โหลดลำดับที่จัดไว้จากครั้งก่อน (DB ก่อน → localStorage สำรอง) =====
+    try {
+      let ord = null;
+      try { ord = JSON.parse(localStorage.getItem("tds_manual_order") || "null"); } catch { }
+      const { data: oc } = await sb.from("order_config").select("order").eq("id", "global").maybeSingle();
+      if (oc && oc.order && typeof oc.order === "object") ord = oc.order;
+      if (ord) {
+        sortMode = ord.mode === "manual" ? "manual" : "auto";
+        manualOrder = Array.isArray(ord.order) ? ord.order.filter((x) => typeof x === "string") : [];
+        updateOrderChip();
+      }
+    } catch { /* ยังไม่มีตาราง/ไม่มีข้อมูลก็ข้าม */ }
+
+    // ===== ลากจัดลำดับเอง (event delegation บน tbody) =====
+    const tbodyDragEl = $("tbody");
+    let dragId = null;
+    tbodyDragEl.addEventListener("dragstart", (e) => {
+      if (sortMode !== "manual") return;
+      const tr = e.target.closest("tr[data-player-id]");
+      if (!tr) return;
+      dragId = tr.dataset.playerId;
+      tr.classList.add("dragging");
+      try { e.dataTransfer.setData("text/plain", dragId); } catch { }
+      e.dataTransfer.effectAllowed = "move";
+    });
+    tbodyDragEl.addEventListener("dragover", (e) => {
+      if (sortMode !== "manual" || !dragId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const tr = e.target.closest("tr[data-player-id]");
+      if (!tr || tr.dataset.playerId === dragId) return;
+      const rect = tr.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      const dragged = tbodyDragEl.querySelector(`tr[data-player-id="${cssEscape(dragId)}"]`);
+      if (dragged) { if (after) tr.after(dragged); else tr.before(dragged); }
+    });
+    tbodyDragEl.addEventListener("drop", (e) => {
+      if (sortMode === "manual") e.preventDefault(); // กันเบราว์เซอร์พาไปหน้าใหม่
+    });
+    tbodyDragEl.addEventListener("dragend", () => {
+      tbodyDragEl.querySelectorAll("tr.dragging").forEach((tr) => tr.classList.remove("dragging"));
+      dragId = null;
+      if (sortMode === "manual") commitManualOrder();
+    });
+    const orderToggleEl = $("orderToggle");
+    if (orderToggleEl) orderToggleEl.addEventListener("click", () => {
+      if (sortMode === "manual") {
+        sortMode = "auto";
+      } else {
+        const currentIds = [...tbodyDragEl.querySelectorAll("tr[data-player-id]")].map((tr) => tr.dataset.playerId);
+        manualOrder = currentIds.length ? currentIds : manualOrder; // จำลำดับปัจจุบันเป็นจุดตั้งต้น
+        sortMode = "manual";
+      }
+      updateOrderChip();
+      saveOrderConfig();
+      render();
+    });
+
     applySortHead();
 
     document.querySelectorAll("#sortHead th").forEach((th) => {
       th.addEventListener("click", () => {
+        // คลิกหัวคอลัมน์ = กลับไปเรียงอัตโนมัติ (ทิ้งโหมดลากจัดเอง)
+        if (sortMode === "manual") { sortMode = "auto"; updateOrderChip(); saveOrderConfig(); }
         const key = th.dataset.sort;
         if (sortKey === key) {
           sortDir = sortDir === "asc" ? "desc" : "asc";
