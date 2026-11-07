@@ -26,7 +26,8 @@ local WebhookStartClock = os.clock()
 local WebhookMessageId = nil
 local WebhookLastSentAt = -math.huge
 local WebhookLastKey = nil
-local WebhookLastSentSupabase = false
+-- สต็อกกระเป๋าตอนเริ่มยก (ใช้คำนวณเหรียญรางวัลที่ได้จริงตอนจบยก)
+local RunStartCoins = nil
 local WebhookNotified = false
 -- ===========================================================
 
@@ -59,7 +60,8 @@ local SavedState = {
 
 local Executor = identifyexecutor and identifyexecutor()
 if Executor == "Solara" or Executor == "Xeno" then
-    game:GetService("Players").LocalPlayer:Kick("Unsupported executor: " .. Executor)
+    LocalPlayer:Kick("Unsupported executor: " .. Executor)
+    return
 end
 
 local function GetRep()
@@ -257,7 +259,7 @@ local function StartGameOverRecovery(rep)
 end
 
 local function Reconnect()
-    if ReconnectCheckRunning then
+    if not LoaderActive or ReconnectCheckRunning then
         return
     end
 
@@ -266,9 +268,11 @@ local function Reconnect()
     task.spawn(function()
         task.wait(2)
 
-        pcall(function()
-            TeleportService:TeleportReconnect()
-        end)
+        if LoaderActive then
+            pcall(function()
+                TeleportService:TeleportReconnect()
+            end)
+        end
 
         ReconnectCheckRunning = false
     end)
@@ -416,7 +420,6 @@ end)
 local STATUS_COLORS = {
     Playing   = 0x2ECC71, -- เขียว
     GameOver  = 0xE74C3C, -- แดง
-    Disconnected = 0xE74C3C, -- แดง (จอหลุด popup ค้าง)
     Recovering= 0xF39C12, -- ส้ม
     Loading   = 0x3498DB, -- ฟ้า
     Lobby     = 0x95A5A6, -- เทา
@@ -424,10 +427,6 @@ local STATUS_COLORS = {
 
 local function GetStatus()
     local rep = GetRep()
-
-    if IsDisconnected() then
-        return "Disconnected", "🔌 จอหลุด (Reconnect ค้าง) — กำลังพยายามกลับเข้าเกมเอง"
-    end
 
     if not rep then
         if game.PlaceId == LOBBY_PLACE_ID then
@@ -621,7 +620,7 @@ local function SendWebhookPayload(payload)
     end
 
     -- ?wait=true เพื่อให้ตอบกลับ id ของข้อความกลับมา
-    local res = HttpJson(WEBHOOK_URL .. "?wait=true", body)
+    local res = HttpJson("POST", WEBHOOK_URL .. "?wait=true", body)
 
     if res and IsHttpSuccess(res.StatusCode) then
         local ok, msg = pcall(function()
@@ -657,11 +656,42 @@ local function GetPlayerIntValue(name)
 end
 
 local function GetPlayerReplicator()
+    -- PlayerReplicator มีหลายอัน (1 ต่อ 1 ผู้เล่น) — เลือกอันของ LocalPlayer
     local stateReplicators =
         ReplicatedStorage:FindFirstChild("StateReplicators")
 
-    return stateReplicators
-        and stateReplicators:FindFirstChild("PlayerReplicator")
+    if not stateReplicators then
+        return nil
+    end
+
+    for _, rep in ipairs(stateReplicators:GetChildren()) do
+        if rep.Name == "PlayerReplicator"
+            -- ตัวตนอาจถูกทำเครื่องหมายด้วย Name หรือ UserId อย่างใดอย่างหนึ่ง
+            and (rep:GetAttribute("Name") == LocalPlayer.Name
+                or rep:GetAttribute("UserId") == LocalPlayer.UserId) then
+            return rep
+        end
+    end
+
+    return nil
+end
+
+local function GetGameStats()
+    local rep = GetRep()
+    if not rep then
+        return nil
+    end
+
+    local playerRep = GetPlayerReplicator()
+    local myTeam = playerRep and tostring(playerRep:GetAttribute("Team"))
+    local wave = rep:GetAttribute("Wave")
+    local winning = tostring(rep:GetAttribute("WinningTeam") or "")
+
+    return {
+        -- ชนะเมื่อ WinningTeam ตรงกับทีมตัวเอง (ค่ายังไม่ตัดสิน = nil)
+        result = myTeam and #winning > 0 and (winning == myTeam and "win" or "lose") or nil,
+        wave = typeof(wave) == "number" and math.floor(wave) or nil,
+    }
 end
 
 local function GetEquippedTowers()
@@ -781,86 +811,7 @@ local function GetMissingTowers()
     return nil
 end
 
--- ================= Run tracking (ชนะ/แพ้ + จบ wave ไหน) =================
--- จับตอนเริ่ม run (rep ตัวใหม่ปรากฏ): เก็บ coin/wins ต้นแดง
--- ตอนเกมโอเวอร์: ผล = wins ขึ้นช่วง run → ชนะ ไม่งั้นแพ้, delta coin = ทั้ง run
-local WAVE_ATTRS = { "Wave", "CurrentWave", "WaveNumber", "CurrentWaveNumber", "Round", "RoundNumber" }
-
-local RunRep = nil
-local RunStartCoins = nil
-local RunStartWins = nil
-local LastWave = nil
-local RunResultSent = false
-
-local function TrackRun(coins, wins)
-    local rep = GetRep()
-
-    if rep then
-        for _, name in ipairs(WAVE_ATTRS) do
-            local v = rep:GetAttribute(name)
-
-            if v ~= nil then
-                LastWave = math.floor(v)
-                break
-            end
-        end
-    end
-
-    if rep ~= RunRep then
-        RunRep = rep
-        RunStartCoins = coins
-        RunStartWins = wins
-        RunResultSent = false
-    end
-end
-
-local function GetLocalTeam()
-    local stateReplicators =
-        ReplicatedStorage:FindFirstChild("StateReplicators")
-
-    local pr = stateReplicators and stateReplicators:FindFirstChild("PlayerReplicator")
-
-    return pr and pr:GetAttribute("Team") or nil
-end
-
-local function BuildRunResult(statusKey, coins, wins)
-    if statusKey ~= "GameOver" or RunResultSent then
-        return
-    end
-
-    RunResultSent = true
-
-    -- ชนะ/แพ้: แหล่งของจริงจากเกม = WinningTeam (ทีมที่ชนะ) เทียบทีมของจอนี้
-    -- (ยืนยันจาก DEBUG2 จอจบเกมจริง: WinningTeam=10 + ทีมตัวเอง 10 → ชนะ)
-    local result = nil
-
-    pcall(function()
-        local rep = GetRep()
-        local winning = rep and rep:GetAttribute("WinningTeam") or nil
-        local team = GetLocalTeam()
-
-        if winning ~= nil and team ~= nil then
-            result = tostring(winning) == tostring(team) and "win" or "lose"
-        end
-    end)
-
-    -- สำรอง: จำนวน Wins ขยับภายใน run → ชนะ (กรณี WinningTeam อ่านไม่ได้)
-    if result == nil and wins ~= nil and RunStartWins ~= nil then
-        result = wins > RunStartWins and "win" or "lose"
-    end
-
-    local runCoins = nil
-
-    if coins ~= nil and RunStartCoins ~= nil then
-        runCoins = coins - RunStartCoins
-    end
-
-    return result, LastWave, runCoins
-end
-
--- ====================================================================
-
-local function SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, runResult, runWave, runCoins)
+local function SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, stats)
     if SUPABASE_URL == "" or SUPABASE_ANON_KEY == "" then
         return
     end
@@ -879,13 +830,13 @@ local function SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, l
         equipped_towers = equippedTowers,
         owned_towers = ownedTowers,
         missing_towers = missingTowers,
-        wave = runWave,
-        result = runResult,
-        run_coins = runCoins,
         place_id = game.PlaceId,
         job_id = game.JobId ~= "" and game.JobId or nil,
         session_seconds = math.floor(elapsed),
-        updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        -- สถิติยกเกม (nil ตอนยังไม่จบ — ไม่เขียนทับคอลัมน์)
+        wave = stats and stats.wave or nil,
+        result = stats and stats.result or nil,
+        run_coins = stats and stats.run_coins or nil,
     })
 
     -- upsert: ถียังไม่มีแถว id นี้จะสร้างใหม่ / ถ้ามีแล้วจะแก้ของเดิม
@@ -903,8 +854,6 @@ local function SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, l
     if not IsHttpSuccess(res and res.StatusCode) then
         return
     end
-
-    WebhookLastSentSupabase = true
 
     return true
 end
@@ -926,10 +875,22 @@ local function SendStatusReport()
     local equippedTowers = GetEquippedTowers()
     local ownedTowers = GetOwnedTowers()
     local missingTowers = GetMissingTowers()
+    -- สถิติยกเกม (wave / ชนะ-แพ้) จาก GameStateReplicator
+    local stats = GetGameStats()
 
-    TrackRun(coins, wins)
-
-    local runResult, runWave, runCoins = BuildRunResult(statusKey, coins, wins)
+    -- เหรียญรางวัลที่ได้จริงต่อยก = กระเป๋าตอนจบ − กระเป๋าตอนเริ่มยก
+    -- (Cash ในยกไม่ใช่รางวัล — มันแสนได้ง่ายถ้าฟาร์มแตก)
+    if statusKey == "Playing" then
+        RunStartCoins = RunStartCoins or coins
+    elseif statusKey == "GameOver" then
+        if coins ~= nil and RunStartCoins ~= nil then
+            stats = stats or {}
+            stats.run_coins = math.max(coins - RunStartCoins, 0)
+        end
+        RunStartCoins = nil
+    else
+        RunStartCoins = nil
+    end
 
     local changeKey = table.concat({
         statusKey,
@@ -937,7 +898,9 @@ local function SendStatusReport()
         tostring(gems),
         tostring(level),
         tostring(wins),
-        tostring(equippedTowers)
+        tostring(equippedTowers),
+        tostring(stats and stats.wave),
+        tostring(stats and stats.result)
     }, "|")
 
     local changed = changeKey ~= WebhookLastKey
@@ -986,7 +949,7 @@ local function SendStatusReport()
 
     -- (2) เว็บ Supabase (ถ้าตั้งค่าไว้)
     if SUPABASE_URL ~= "" and SUPABASE_ANON_KEY ~= "" then
-        SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, runResult, runWave, runCoins)
+        SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, stats)
     end
 
     WebhookLastKey = changeKey
@@ -1009,173 +972,6 @@ task.spawn(function()
 end)
 -- ===========================================================
 
--- ================= one-time structure probe (สำหรับดีบัก, ลบได้เมื่อเสร็จ) =================
--- ขึ้นรอบแรก: รอให้เข้าเกม -> เก็บชื่อสถิติทุกที่ที่มี -> ส่งขึ้นแถว "debug" ใน Supabase
-local PROBE_ENABLED = true -- ⏳ เปิดรอบเดียวหาชื่อ attribute wave ของเกม → จะเขียนแถว DEBUG ใน Supabase (เสร็จแล้วปิดกลับ false)
-
-task.spawn(function()
-    if not PROBE_ENABLED or SUPABASE_URL == "" then
-        return
-    end
-
-    -- รอเข้าเกมจริง (GameStateReplicator ปรากฏ) แล้วจึงจับสถิติ — สูงสุด ~20 นาที
-    for _ = 1, 600 do
-        if IsInGame() then
-            break
-        end
-
-        task.wait(2)
-    end
-
-    if not IsInGame() then
-        return
-    end
-
-    task.wait(3) -- ให้ attribute ล่าสุดของเกมเทลงมาครบ
-
-    local out = {}
-
-    local function add(...)
-        table.insert(out, table.concat({...}, " "))
-    end
-
-    local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
-
-    if leaderstats then
-        for _, stat in ipairs(leaderstats:GetChildren()) do
-            local ok, value = pcall(function() return stat.Value end)
-            add("LS:", stat.Name, stat.ClassName, "=", ok and tostring(value) or "?")
-        end
-    else
-        add("LS:none")
-    end
-
-    for _, containerName in ipairs({"stats","Stats","stuffs","Currency","ServerStats","PlayerStats"}) do
-        local container = LocalPlayer:FindFirstChild(containerName)
-
-        if container then
-            add("ALT:", containerName)
-
-            for _, valueNode in ipairs(container:GetDescendants()) do
-                if valueNode:IsA("ValueBase") then
-                    local ok, value = pcall(function() return valueNode.Value end)
-                    add("ALT-val:", valueNode.Name, "=", ok and tostring(value) or "?")
-                end
-            end
-        end
-    end
-
-    local stateReplicators =
-        ReplicatedStorage:FindFirstChild("StateReplicators")
-
-    if stateReplicators then
-        for _, child in ipairs(stateReplicators:GetChildren()) do
-            for attrKey, attrValue in pairs(child:GetAttributes()) do
-                add("SR-attr:", child.Name, attrKey, "=", tostring(attrValue), "(" .. typeof(attrValue) .. ")")
-            end
-        end
-    end
-
-    for attrName, attrValue in pairs(LocalPlayer:GetAttributes()) do
-        add("PATTR:", attrName, "=", tostring(attrValue), "(" .. typeof(attrValue) .. ")")
-    end
-
-    local ok, err = pcall(function()
-        HttpJson(
-            "POST",
-            SUPABASE_URL .. "/rest/v1/reports?on_conflict=id",
-            HttpService:JSONEncode({
-                id = "debug",
-                display_name = "DEBUG",
-                username = "probe",
-                status = "Debug",
-                status_text = "probe place " .. game.PlaceId
-                    .. " player " .. LocalPlayer.Name
-                    .. " || " .. table.concat(out, " || "),
-                place_id = game.PlaceId,
-                job_id = game.JobId ~= "" and game.JobId or nil,
-                session_seconds = 0,
-                updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-            }),
-            {
-                ["apikey"] = SUPABASE_ANON_KEY,
-                ["Authorization"] = "Bearer " .. SUPABASE_ANON_KEY,
-                ["Prefer"] = "resolution=merge-duplicates",
-            }
-        )
-    end)
-
-    if not ok then
-        warn("[probe] upload failed: " .. tostring(err))
-    else
-        print("[probe] uploaded structure snapshot")
-    end
-
-    -- ===== จับรอบที่สอง: ตอนเกมโอเวอร์ (GameOver attribute ขึ้นจริง) =====
-    -- หวังเจอ атtribute บอกผลชนะ/แพ้ (Result/Won/Triumph ฯลฯ) ณ วินาทีเกมจบ + เลข wave สุดท้าย
-    for _ = 1, 1500 do
-        local rep = GetRep()
-
-        if rep and rep:GetAttribute("GameOver") == true then
-            break
-        end
-
-        task.wait(2)
-    end
-
-    local out2 = {}
-
-    local function add2(...)
-        table.insert(out2, table.concat({...}, " "))
-    end
-
-    local repEnd = GetRep()
-
-    if repEnd then
-        for attrKey, attrValue in pairs(repEnd:GetAttributes()) do
-            add2("GO-attr:", attrKey, "=", tostring(attrValue), "(" .. typeof(attrValue) .. ")")
-        end
-    else
-        add2("GO-attr:none")
-    end
-
-    local winsNow = GetPlayerIntValue("Wins")
-    add2("GO-wins:", tostring(winsNow))
-
-    local coinsEnd = select(1, DetectCurrency())
-    add2("GO-coins:", tostring(coinsEnd))
-
-    local ok2 = select(1, pcall(function()
-        HttpJson(
-            "POST",
-            SUPABASE_URL .. "/rest/v1/reports?on_conflict=id",
-            HttpService:JSONEncode({
-                id = "debug2",
-                display_name = "DEBUG2",
-                username = "probe",
-                status = "Debug",
-                status_text = "gameover-probe player " .. LocalPlayer.Name
-                    .. " || " .. table.concat(out2, " || "),
-                place_id = game.PlaceId,
-                job_id = game.JobId ~= "" and game.JobId or nil,
-                session_seconds = 0,
-                updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-            }),
-            {
-                ["apikey"] = SUPABASE_ANON_KEY,
-                ["Authorization"] = "Bearer " .. SUPABASE_ANON_KEY,
-                ["Prefer"] = "resolution=merge-duplicates",
-            }
-        )
-    end))
-
-    if not ok2 then
-        warn("[probe] gameover upload failed")
-    else
-        print("[probe] uploaded gameover snapshot")
-    end
-end)
--- ===========================================================
 
 local ok, err = pcall(function()
 loadstring(game:HttpGet("https://api.jnkie.com/api/v1/luascripts/public/96aa3bb286648b1860f83b0d1dffc8b67b5091050f89341b6384c4450894193d/download"))()
@@ -1183,123 +979,16 @@ end)
 
 LoaderActive = false
 
--- (ไม่ตัด ErrorConnection/PromptConnection — ให้ watcher ค้างอยู่ตลอดตัวโปรแกรม)
-ReconnectCheckRunning = false
-
--- ================= Keepระบบ Reconnect เดิมและ watchdog จอหลุด (popup ค้าง) =================
--- * ตรวจทุก 5 วิ → สถานะบน dashboard ขึ้น "Disconnected" เฉพาะเมื่อหลุดจริง (ยืนยันนิ่ง ~15 วิ)
---   - จับจาก popup จริง (ErrorPrompt แขวนใน promptOverlay) = หลุดชัดเจน
---   - หรือ error code / player หลุดจาก Players นิ่ง 15 วิ (กัน false positive ตอน teleport/โหลด)
---   - ถ้ามีจอโหลดอยู่ = โครงปกติ → รีเซ็ตเสมอ
--- * หลุดนิ่ง: ลอง TeleportReconnect ทุก 10 วิ ใน 4 นาทีแรก
--- * หา 4 นาทียังค้าง → teleport เข้า Lobby ใหม่ทั้งระบบ (รื้อ popup ทันที)
-local DisconnectedSince = nil
-local LastRejoinAttempt = 0
-local DiscRawFirstAt = nil
-
-local function IsDisconnected()
-    -- (1) จอโหลด/teleport อยู่ = สถานะปกติที่ผ่านได้เอง → ไม่นับว่าหลุด
-    local okLoading, loading = pcall(IsLoading)
-
-    if okLoading and loading then
-        DiscRawFirstAt = nil
-        return false
-    end
-
-    -- (2) popup จริง: ErrorPrompt ยังแขวนอยู่ใน CoreGui promptOverlay = หลุดชัดเจน
-    local popupVisible = false
-
-    pcall(function()
-        local overlay =
-            CoreGui:FindFirstChild("RobloxPromptGui")
-            and CoreGui.RobloxPromptGui:FindFirstChild("promptOverlay")
-
-        if overlay then
-            for _, child in ipairs(overlay:GetChildren()) do
-                if child.Name == "ErrorPrompt"
-                    and child.Visible ~= false then
-
-                    popupVisible = true
-                    break
-                end
-            end
-        end
-    end)
-
-    if popupVisible then
-        DiscRawFirstAt = nil
-        return true
-    end
-
-    -- (3) สัญญาณอ่อน: error code ค้าง / player ขาดจาก ต้องนิ่ง ≥15 วิ จึงยอมว่าหลุด
-    local raw = false
-
-    pcall(function()
-        local code = GuiService:GetErrorCode()
-
-        if code ~= nil
-            and code ~= Enum.ConnectionError.OK then
-
-            raw = true
-        end
-    end)
-
-    pcall(function()
-        if not LocalPlayer:IsDescendantOf(game) then
-            raw = true
-        end
-    end)
-
-    local now = os.clock()
-
-    if not raw then
-        DiscRawFirstAt = nil
-        return false
-    end
-
-    if not DiscRawFirstAt then
-        DiscRawFirstAt = now
-    end
-
-    if now - DiscRawFirstAt >= 15 then
-        return true
-    end
-
-    return false
+if ErrorConnection then
+    ErrorConnection:Disconnect()
 end
 
-task.spawn(function()
-    while true do
-        task.wait(5)
+if PromptConnection then
+    PromptConnection:Disconnect()
+end
 
-        if IsDisconnected() then
-            if not DisconnectedSince then
-                DisconnectedSince = os.clock()
-            end
+ReconnectCheckRunning = false
 
-            local held = os.clock() - DisconnectedSince
-
-            if held >= 4 * 60 then
-                if os.clock() - LastRejoinAttempt >= 60 then
-                    LastRejoinAttempt = os.clock()
-
-                    pcall(function()
-                        TeleportService:Teleport(
-                            LOBBY_PLACE_ID,
-                            LocalPlayer
-                        )
-                    end)
-                end
-            elseif os.clock() - LastRejoinAttempt >= 10 then
-                LastRejoinAttempt = os.clock()
-
-                pcall(function()
-                    TeleportService:TeleportReconnect()
-                end)
-            end
-        else
-            DisconnectedSince = nil
-        end
-    end
-end)
--- ===========================================================
+if not ok then
+    warn(err)
+end
