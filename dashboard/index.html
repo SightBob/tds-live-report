@@ -246,6 +246,13 @@
     cursor: pointer; transition: color .15s, border-color .15s;
   }
   .d-close:hover { color: var(--danger); border-color: var(--danger); }
+  /* ===== หน้า Detail (แทน popup) ===== */
+  #detailPage { max-width: 980px; margin: 0 auto; padding: 20px 2px 46px; }
+  #detailPage.hidden { display: none; }
+  .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .page-head .muted { color: var(--muted); font-size: 12.5px; }
+  .detail-page-card { max-height: none; box-shadow: 0 18px 60px rgba(0,0,0,.35); }
+  body.page-detail .panel { display: none; }
   .d-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 10px; margin-bottom: 20px;
@@ -318,9 +325,13 @@
     </div>
   </div>
 
-  <div class="overlay hidden" id="detailOverlay">
-    <div class="detail-card" id="detailCard"></div>
-  </div>
+  <section id="detailPage" class="hidden">
+    <div class="page-head">
+      <button class="d-close" id="detailBackBtn">← กลับตาราง</button>
+      <span class="muted">ข้อมูลรีเฟรชอัตโนมัติ · หยุดพักเองเมื่อคุณพิมพ์ในช่องกรอก</span>
+    </div>
+    <div class="detail-card detail-page-card" id="detailCard"></div>
+  </section>
 </div>
 
 <script>
@@ -609,7 +620,7 @@
     if (openDetailId) {
       const openRow = rows.get(openDetailId);
       if (openRow) {
-        // อย่า re-paint ตอน focus อยู่ที่ช่องกรอกใน modal — กัน focus หลุด
+        // อย่า re-paint ตอน focus อยู่ที่ช่องกรอก — กัน focus หลุด
         const ae = document.activeElement;
         const typingInModal = ae && (ae.id === "accLabel" || ae.id === "accSold");
         if (!typingInModal) {
@@ -617,6 +628,9 @@
           renderDetailCard(openRow);
         }
       }
+    } else if ((location.hash || "").startsWith("#p/")) {
+      // เข้ามาผ่านลิงก์ #p/<id> ก่อนข้อมูลโหลดเสร็จ — ลุ้นรอบถัดไปจนกว่าจะเจอแถว
+      applyRoute();
     }
   }
 
@@ -745,25 +759,36 @@
   }
 
   function openDetail(id) {
-    const row = rows.get(id);
-    if (!row) return;
-    openDetailId = id;
-    loadHistory(id, true);
-    renderDetailCard(row);
-    $("detailOverlay").classList.remove("hidden");
+    location.hash = "p/" + id;
   }
 
   function closeDetail() {
-    openDetailId = null;
-    $("detailOverlay").classList.add("hidden");
+    if ((location.hash || "").startsWith("#p/")) location.hash = "";
+  }
+
+  function applyRoute() {
+    const m = (location.hash || "").match(/^#p\/(.+)$/);
+    const id = m ? m[1] : null;
+    const row = id && rows.get(id);
+    if (!row) {
+      // ยังไม่เจอแถว (ข้อมูลยังไม่โหลด / id ผิด) → อยู่หน้าตารางเงียบ ๆ รอรอบถัดไป
+      openDetailId = null;
+      document.body.classList.remove("page-detail");
+      $("detailPage").classList.add("hidden");
+      return;
+    }
+    openDetailId = id;
+    document.body.classList.add("page-detail");
+    $("detailPage").classList.remove("hidden");
+    loadHistory(id, true);
+    renderDetailCard(row);
   }
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeDetail();
   });
-  $("detailOverlay").addEventListener("click", (e) => {
-    if (e.target === e.currentTarget) closeDetail();
-  });
+  $("detailBackBtn").addEventListener("click", closeDetail);
+  window.addEventListener("hashchange", applyRoute);
 
   async function main() {
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
