@@ -348,6 +348,19 @@
 
   const alertClock = (iso) => new Date(iso).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
 
+  // ===== เก็บอีเมลแจ้งเตือนลง Supabase (alert_config) — ตั้งครั้งเดียว ทุกเครื่องใช้ร่วมกัน =====
+  let alertEmailSaveTimer = null;
+  function saveAlertEmail(email) {
+    localStorage.setItem("tds_alert_email", email);
+    clearTimeout(alertEmailSaveTimer);
+    alertEmailSaveTimer = setTimeout(() => {
+      if (sb) {
+        sb.from("alert_config")
+          .upsert({ id: "global", email: email || null, updated_at: new Date().toISOString() }, { onConflict: "id" });
+      }
+    }, 800);
+  }
+
   function whoAmI(id) {
     return accountLabel(id) ? (accountLabel(id) + " (id " + id + ")") : ("id " + id);
   }
@@ -809,8 +822,16 @@
     const emailInput = $("alertEmail");
     emailInput.value = localStorage.getItem("tds_alert_email") || "";
     emailInput.addEventListener("input", (e) => {
-      localStorage.setItem("tds_alert_email", e.target.value.trim());
+      saveAlertEmail(e.target.value.trim());
     });
+    // เครื่องนี้ยังไม่ได้ตั้งอีเมล? ดึงร่วมกันจากตาราง alert_config
+    try {
+      const { data: cfg } = await sb.from("alert_config").select("email").eq("id", "global").maybeSingle();
+      if (cfg && cfg.email && !localStorage.getItem("tds_alert_email")) {
+        localStorage.setItem("tds_alert_email", cfg.email);
+        emailInput.value = cfg.email;
+      }
+    } catch { /* DB ยังไม่มีตารางก็ข้าม */ }
 
     async function load() {
       const { data, error } = await sb.from("reports").select("*").order("updated_at", { ascending: false });
