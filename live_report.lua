@@ -811,7 +811,67 @@ local function GetMissingTowers()
     return nil
 end
 
-local function SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, stats)
+-- ============================================================
+--  Skill Tree (owned / missing)
+--  แหล่งข้อมูลจริง: Client.Controllers.Lobby.SkillTreeController
+--  (ต้นไม้ 3D hex — tile แต่ละตัวมี Atoms.Level/SkillCap/IsLocked/IsMaxedOut)
+--  นิยาม node ทั้งหมด 17 ตัว: Shared.Data.Skills.Versions.SkillsV0
+-- ============================================================
+local function GetSkillTreeReport()
+    -- อ่าน upvalue ของ controller (ต้องใช้ executor; ถ้าไม่มีจะคืน nil แล้วข้าม)
+    local getups = getupvalues or (typeof(debug) == "table" and debug.getupvalues) or nil
+    if typeof(getups) ~= "function" then
+        return nil, nil
+    end
+
+    local ok, ownedList, missingList = pcall(function()
+        local controller = require(ReplicatedStorage.Client.Controllers.Lobby.SkillTreeController)
+        local owned, missing = {}, {}
+
+        -- self ของ controller อยู่ใน upvalue ของ init (มี Trees + _setLevel)
+        for _, uv in ipairs(getups(controller.init)) do
+            if typeof(uv) == "table" and typeof(uv.Trees) == "table" and typeof(uv._setLevel) == "function" then
+                for skillId, tile in pairs(uv.Trees[1].Tiles) do
+                    local okAtoms, atoms = pcall(function() return tile.Atoms end)
+                    if okAtoms and typeof(atoms) == "table" and typeof(atoms.Level) == "function" then
+                        local okL, lvl = pcall(atoms.Level)
+                        local okC, cap = pcall(atoms.SkillCap)
+                        local okK, locked = pcall(atoms.IsLocked)
+                        local okM, maxed = pcall(atoms.IsMaxedOut)
+                        local name = tile.SkillData and tostring(tile.SkillData.displayName) or ("Node" .. tostring(skillId))
+
+                        if okL and okC then
+                            local lvlN = tonumber(lvl)
+                            local capN = tonumber(cap) or (tile.SkillData and tonumber(tile.SkillData.skillLevelCap))
+
+                            if lvlN and lvlN > 0 then
+                                table.insert(owned, string.format("%s %s/%s%s", name, tostring(lvl), tostring(cap), maxed == true and " (max)" or ""))
+                            end
+                            if locked == true then
+                                table.insert(missing, string.format("%s %s/%s (locked)", name, tostring(lvl), tostring(cap)))
+                            elseif capN and lvlN and lvlN < capN then
+                                table.insert(missing, string.format("%s %s/%s", name, tostring(lvl), tostring(cap)))
+                            end
+                        end
+                    end
+                end
+                break
+            end
+        end
+
+        table.sort(owned)
+        table.sort(missing)
+        return owned, missing
+    end)
+
+    if ok and typeof(ownedList) == "table" then
+        return HttpService:JSONEncode(ownedList), HttpService:JSONEncode(missingList)
+    end
+
+    return nil, nil
+end
+
+local function SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, skillOwned, skillMissing, stats)
     if SUPABASE_URL == "" or SUPABASE_ANON_KEY == "" then
         return
     end
@@ -830,6 +890,9 @@ local function SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, l
         equipped_towers = equippedTowers,
         owned_towers = ownedTowers,
         missing_towers = missingTowers,
+        -- skill tree (nil ตอนอ่านไม่ได้ — ไม่เขียนทับคอลัมน์)
+        skill_owned = skillOwned,
+        skill_missing = skillMissing,
         place_id = game.PlaceId,
         job_id = game.JobId ~= "" and game.JobId or nil,
         session_seconds = math.floor(elapsed),
@@ -875,6 +938,8 @@ local function SendStatusReport()
     local equippedTowers = GetEquippedTowers()
     local ownedTowers = GetOwnedTowers()
     local missingTowers = GetMissingTowers()
+    -- skill tree (owned / missing) — จากต้นไม้ skill ใน lobby
+    local skillOwned, skillMissing = GetSkillTreeReport()
     -- สถิติยกเกม (wave / ชนะ-แพ้) จาก GameStateReplicator
     local stats = GetGameStats()
 
@@ -949,7 +1014,7 @@ local function SendStatusReport()
 
     -- (2) เว็บ Supabase (ถ้าตั้งค่าไว้)
     if SUPABASE_URL ~= "" and SUPABASE_ANON_KEY ~= "" then
-        SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, stats)
+        SendSupabaseReport(statusKey, statusText, coins, gems, elapsed, level, wins, equippedTowers, ownedTowers, missingTowers, skillOwned, skillMissing, stats)
     end
 
     WebhookLastKey = changeKey
