@@ -1099,7 +1099,7 @@ task.spawn(function()
             "POST",
             SUPABASE_URL .. "/rest/v1/reports?on_conflict=id",
             HttpService:JSONEncode({
-                id = "debug",
+                id = "skillprobe", -- อย่าใช้ 'debug'/'probe' — ถูกแบล็กด้วย trigger ใน DB
                 display_name = "DEBUG",
                 username = "skillprobe",
                 status = "Debug",
@@ -1120,7 +1120,7 @@ task.spawn(function()
     end)
 
     if okUpload then
-        print("[skillprobe] uploaded structure data (id=debug)")
+        print("[skillprobe] uploaded structure data (id=skillprobe)")
     end
 end)
 -- ===========================================================
