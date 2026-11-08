@@ -975,7 +975,7 @@ end)
 
 -- ================= one-time skill store probe (สำหรับดีบัก, ปิดตามจบ) =================
 -- รันครั้งเดียวต่อเซสชัน: เก็บชื่อ store ทั้งหมด + รูปร่างของ state ใน store ที่ชื่อมี "skill"
--- แล้วส่งขึ้น Supabase แถว id="debug" เพื่อดีไวน์ระบบแจกแจง skill tree ให้ตรงตัวเกมจริง
+-- แล้วส่งขึ้น Supabase แถว id="skillprobe" (ตัว id ชุด debug/probe โดน trigger ใน DB แบล็กไว้)
 local SKILL_PROBE_ENABLED = true
 
 task.spawn(function()
