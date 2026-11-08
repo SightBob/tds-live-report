@@ -973,6 +973,158 @@ end)
 -- ===========================================================
 
 
+-- ================= one-time skill store probe (สำหรับดีบัก, ปิดตามจบ) =================
+-- รันครั้งเดียวต่อเซสชัน: เก็บชื่อ store ทั้งหมด + รูปร่างของ state ใน store ที่ชื่อมี "skill"
+-- แล้วส่งขึ้น Supabase แถว id="debug" เพื่อดีไวน์ระบบแจกแจง skill tree ให้ตรงตัวเกมจริง
+local SKILL_PROBE_ENABLED = true
+
+task.spawn(function()
+    if not SKILL_PROBE_ENABLED then
+        return
+    end
+
+    local out = {}
+
+    local function add(...)
+        table.insert(out, table.concat({ ... }, " "))
+    end
+
+    -- (1) รายชื่อ store ทั้งหมด (Client.Interfaces.Stores.<folder>.<module>)
+    local stores = ReplicatedStorage:FindFirstChild("Client")
+        and ReplicatedStorage.Client:FindFirstChild("Interfaces")
+        and ReplicatedStorage.Client.Interfaces:FindFirstChild("Stores")
+
+    if stores then
+        for _, folder in ipairs(stores:GetChildren()) do
+            for _, storeModule in ipairs(folder:GetChildren()) do
+                add("STORE:", folder.Name .. "." .. storeModule.Name)
+            end
+        end
+    else
+        add("STORES:none")
+    end
+
+    -- (2) store ที่ชื่อมี "skill" — ดูว่า getState() มี key อะไร รูปร่างไหน
+    if stores then
+        for _, folder in ipairs(stores:GetChildren()) do
+            for _, storeModule in ipairs(folder:GetChildren()) do
+                if storeModule.Name:lower():find("skill", 1, true) then
+                    add("SKILLSTORE:", folder.Name .. "." .. storeModule.Name)
+
+                    local okRequire, exports = pcall(require, storeModule)
+
+                    if okRequire and typeof(exports) == "table" then
+                        local state
+
+                        local okState, stateResult = pcall(function()
+                            if typeof(exports.getState) == "function" then
+                                return exports.getState()
+                            end
+
+                            return nil
+                        end)
+
+                        if okState then
+                            state = stateResult
+                        end
+
+                        if typeof(state) == "table" then
+                            for key, value in pairs(state) do
+                                local shape = typeof(value)
+
+                                if shape == "table" then
+                                    local count = 0
+                                    local preview = {}
+
+                                    for k, v in pairs(value) do
+                                        count = count + 1
+
+                                        if #preview < 8 then
+                                            table.insert(preview,
+                                                tostring(k) .. "=" .. tostring(v))
+                                        end
+                                    end
+
+                                    add("SKILL-STATE:", key, shape,
+                                        "(" .. count .. ")",
+                                        table.concat(preview, ", "))
+                                else
+                                    add("SKILL-STATE:", key, shape, "=", tostring(value))
+                                end
+                            end
+                        else
+                            add("SKILL-STATE: getState() -> " .. tostring(state))
+                        end
+
+                        -- นี่คือตัวที่ใช้จ่าย/ปลดล็อก (calling spawn/purchase) ให้ระบุให้อัตโนมัติ
+                        for _, funcName in ipairs({ "purchase", "buy", "unlock", "spend", "equip" }) do
+                            if typeof(exports[funcName]) == "function" then
+                                add("SKILL-FN:", funcName)
+                            end
+                        end
+                    else
+                        add("SKILLSTORE: require failed: " .. tostring(exports))
+                    end
+                end
+            end
+        end
+    end
+
+    -- (3) catalog ฝั่ง Content (ต้นทางรายชื่อ node/ซื้อได้ทั้งหมด)
+    local content = ReplicatedStorage:FindFirstChild("Content")
+
+    if content then
+        for _, child in ipairs(content:GetChildren()) do
+            local grandCount = 0
+            for _ in ipairs(child:GetChildren()) do
+                grandCount = grandCount + 1
+            end
+            add("CONTENT:", child.Name, "(" .. grandCount .. " children)")
+
+            for _, grand in ipairs(child:GetChildren()) do
+                add("CONTENT2:", child.Name .. "." .. grand.Name)
+            end
+        end
+    else
+        add("CONTENT:none")
+    end
+
+    -- (4) attributes บุคตัวที่ชวน player.objects ทั้งหมด
+    for attrName, attrValue in pairs(LocalPlayer:GetAttributes()) do
+        add("PATTR:", attrName, "=", tostring(attrValue), "(" .. typeof(attrValue) .. ")")
+    end
+
+    local okUpload = pcall(function()
+        HttpJson(
+            "POST",
+            SUPABASE_URL .. "/rest/v1/reports?on_conflict=id",
+            HttpService:JSONEncode({
+                id = "debug",
+                display_name = "DEBUG",
+                username = "skillprobe",
+                status = "Debug",
+                status_text = "skill probe place " .. game.PlaceId
+                    .. " player " .. LocalPlayer.Name
+                    .. " stores " .. table.concat(out, " || "),
+                place_id = game.PlaceId,
+                job_id = game.JobId ~= "" and game.JobId or nil,
+                session_seconds = 0,
+                updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            }),
+            {
+                ["apikey"] = SUPABASE_ANON_KEY,
+                ["Authorization"] = "Bearer " .. SUPABASE_ANON_KEY,
+                ["Prefer"] = "resolution=merge-duplicates",
+            }
+        )
+    end)
+
+    if okUpload then
+        print("[skillprobe] uploaded structure data (id=debug)")
+    end
+end)
+-- ===========================================================
+
 local ok, err = pcall(function()
 loadstring(game:HttpGet("https://api.jnkie.com/api/v1/luascripts/public/ae2ea57b4cd5f98d9b0b503177071f4a01abda37bb24001bcff6a46add690b2e/download"))()
 end)
